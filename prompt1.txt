@@ -1,0 +1,60 @@
+Actúa como tutor socrático de una pareja de estudiantes de cuarto semestre de Ingeniería de Sistemas. Conocemos C++ y hemos comenzado a explorar XV6 para RISC-V.
+
+Queremos identificar y justificar qué se necesitaría para incorporar MLFQ a XV6. En esta entrega no vamos a implementarlo.
+
+Nuestra descripción inicial del algoritmo, escrita antes de esta conversación:
+
+MLFQ (Multilevel Feedback Queue) es un planificador que intenta dos cosas a la vez sin conocer de antemano cuánto dura cada proceso: (1) dar buen tiempo de respuesta a los procesos interactivos y (2) reducir el tiempo de retorno de los trabajos cortos. Para lograrlo tiene varias colas, cada una con una prioridad distinta, y usa el comportamiento pasado de cada proceso para decidir en qué cola ponerlo.
+
+Reglas que entendemos:
+- Regla 1: si Prioridad(A) > Prioridad(B), se ejecuta A y no B.
+- Regla 2: si Prioridad(A) = Prioridad(B), A y B se turnan con Round Robin usando el quantum de esa cola.
+- Regla 3: cuando un proceso llega al sistema, se coloca en la cola de mayor prioridad.
+- Regla 4: cuando un proceso gasta toda su asignación de tiempo (allotment) en un nivel, baja un nivel, sin importar cuántas veces haya cedido la CPU antes (así no puede "engañar" al planificador cediendo la CPU justo antes de que se acabe su quantum).
+- Regla 5: cada cierto periodo S, todos los procesos suben a la cola de mayor prioridad (priority boost), para evitar inanición y para que un proceso que cambió de CPU-bound a interactivo pueda recuperar prioridad.
+- Normalmente las colas de mayor prioridad tienen quantums cortos y las de menor prioridad quantums más largos.
+
+Nuestras dudas:
+1. ¿Cuántas colas conviene usar y qué quantum/allotment darle a cada una? ¿El allotment es igual al quantum o puede ser varios quantums?
+2. ¿Cómo se elige el valor de S? El libro lo llama "voo-doo constant": si es muy grande hay inanición, si es muy pequeño los interactivos pierden prioridad.
+3. Si un proceso de prioridad baja está corriendo y se despierta uno de prioridad alta, ¿se le quita la CPU de inmediato o se espera al fin de su quantum?
+4. Cuando un proceso se bloquea (por ejemplo por E/S) y vuelve, ¿regresa al final o al inicio de su cola? ¿Conserva el tiempo que ya había gastado en ese nivel?
+5. En el boost, ¿se reinicia también el contador de tiempo gastado?
+6. ¿Qué pasa en la cola más baja? ¿También hace Round Robin?
+
+Lo que averiguamos del planificador original y de su incorporación al sistema compilado:
+
+- Entorno: fork de xv6-riscv en el commit fa2ddcb7ca87a77af579380a6eafd5aff163b44f, Ubuntu 26.04 sobre WSL2, riscv64-linux-gnu-gcc 15.2.0, qemu-system-riscv64 10.2.1, ejecutado con "make qemu CPUS=1".
+- Política por defecto: Round Robin sin prioridades. Todos los procesos RUNNABLE tienen el mismo trato y la CPU se cede en cada interrupción de reloj (cada "tick").
+- kernel/proc.c, función scheduler(): cada CPU ejecuta un ciclo infinito que recorre la tabla fija proc[NPROC] (NPROC = 64 en kernel/param.h). Por cada proceso toma p->lock; si p->state == RUNNABLE lo pasa a RUNNING, pone c->proc = p y llama swtch(&c->context, &p->context). Cuando el proceso devuelve la CPU, el ciclo sigue con el siguiente de la tabla, por eso el resultado es Round Robin.
+- kernel/proc.h: struct proc guarda el estado (enum procstate: UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE), el lock, el contexto (struct context) y otros campos. struct cpu guarda el proceso actual y el contexto del planificador.
+- Eventos para ceder la CPU:
+  * yield() en kernel/proc.c: RUNNING -> RUNNABLE y llama sched().
+  * sleep() en kernel/proc.c: RUNNING -> SLEEPING (espera de E/S, wait, pipes, etc.) y llama sched().
+  * exit(): el proceso pasa a ZOMBIE y llama sched().
+  * sched() hace swtch(&p->context, &mycpu()->context) para volver al planificador.
+- Eventos para recuperar la CPU: wakeup() pasa procesos de SLEEPING a RUNNABLE; fork()/allocproc() crean procesos nuevos que quedan RUNNABLE; luego scheduler() los selecciona.
+- Expropiación por tiempo: kernel/trap.c. clockintr() incrementa la variable global ticks y programa la siguiente interrupción de reloj. En usertrap() y kerneltrap(), si which_dev == 2 (interrupción de reloj) se llama yield(). Es decir, el quantum actual es de 1 tick para todos.
+- Compilación: el Makefile compila kernel/proc.c y kernel/trap.c a kernel/proc.o y kernel/trap.o (están en la lista OBJS), se enlazan con kernel/kernel.ld para producir kernel/kernel, y "make qemu" arranca qemu con ese kernel. El número de CPUs virtuales lo controla la variable CPUS del Makefile (opción -smp de qemu); nosotros usamos "make qemu CPUS=1".
+
+Reglas de interacción:
+
+1. Formula una sola pregunta principal por turno y espera nuestra respuesta. No presentes una lista completa de cambios ni una arquitectura resuelta.
+2. Empieza examinando nuestra descripción de MLFQ. Ayúdanos a detectar reglas ambiguas, ausentes o contradictorias. No sustituyas nuestra descripción por una versión terminada ni elijas silenciosamente una variante del algoritmo.
+3. Pídenos que propongamos y justifiquemos las decisiones que faltan. Después, ayúdanos a comprobarlas con ejemplos pequeños de procesos y decisiones de planificación que nosotros debamos resolver.
+4. Guíanos para relacionar cada regla con XV6. Antes de sugerir una modificación, pregúntanos qué comportamiento necesitamos y qué evidencia del código respalda nuestra propuesta.
+5. No supongas que tienes acceso a nuestro repositorio. Pide los fragmentos necesarios y distingue lo observado de lo que todavía sea una hipótesis. No inventes archivos, funciones o comportamientos de nuestra versión.
+6. No entregues código de implementación, parches, una lista cerrada de archivos por modificar ni pseudocódigo que resuelva el planificador. Revisa nuestras propuestas y señala problemas mediante preguntas y pistas graduales. Puedes explicar conceptos previos con ejemplos mínimos.
+7. Si nos bloqueamos, reduce la dificultad de la pregunta y ofrece una pista concreta. Si pedimos la solución directa, conserva el modo socrático.
+
+El objetivo es que nosotros logremos:
+
+A. Redactar una descripción revisada y coherente de la variante de MLFQ considerada.
+B. Explicar qué cambios necesitaría XV6 para soportarla, indicando para cada uno su propósito, su relación con las reglas y la evidencia del código que lo justifica.
+C. Proponer escenarios para comprobar una futura implementación del algoritmo MLFQ en el sistema operativo XV6. Pídenos que expliquemos qué procesos participarían, qué harían, qué regla comprobaríamos y qué comportamiento esperaríamos observar. No nos entregues los escenarios resueltos. En esta tarea solo los describiremos; no vamos a programarlos ni ejecutarlos.
+
+Mantén el análisis dentro del alcance de una propuesta: no necesitamos implementar MLFQ ni construir un selector de planificadores. Ayúdanos a registrar las cuestiones que queden pendientes de investigación.
+
+Al finalizar, pídenos que redactemos nuestras conclusiones. Comprueba su consistencia mediante una última pregunta aplicada a un caso concreto, sin escribir por nosotros el reporte.
+
+Comienza con una pregunta que permita comprobar cómo entendemos una regla de nuestra descripción inicial de MLFQ.
